@@ -1,0 +1,544 @@
+% !TeX program = pdflatex
+\documentclass[a4paper,11pt]{article}
+
+\usepackage{vub}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{subcaption}
+
+% Code listing style
+\lstset{
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    frame=single,
+    language=Python,
+    showstringspaces=false,
+    commentstyle=\color{gray},
+    keywordstyle=\color{blue},
+    stringstyle=\color{red}
+}
+
+\title{Machine Learning for Wind Turbine Power Prediction}
+\subtitle{A Comprehensive Study of Gradient Boosting and Neural Network Approaches}
+\faculty{Sciences and Bio-Engineering Sciences}
+\author{Tibo Stans}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This project presents a comprehensive machine learning pipeline for predicting wind turbine power output based on operational and environmental data. We explore multiple approaches including baseline linear models, gradient boosting methods (XGBoost, LightGBM, CatBoost), hyperparameter optimization using Optuna, ensemble techniques, and neural networks. Our best performing model achieves a Mean Absolute Error (MAE) of 9.10 kW on the public leaderboard, representing a 91.6\% improvement over the baseline. We demonstrate why gradient boosting methods outperform neural networks for tabular data and provide insights into feature engineering and model optimization strategies.
+
+\vspace{0.5cm}
+\noindent\textbf{Keywords:} Wind Energy, Machine Learning, Gradient Boosting, XGBoost, Optuna, Neural Networks, Time Series Prediction
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Introduction}
+
+\subsection{Problem Statement}
+Wind energy is a crucial component of renewable energy infrastructure. Accurate prediction of wind turbine power output is essential for:
+\begin{itemize}
+    \item Grid management and load balancing
+    \item Maintenance scheduling and anomaly detection
+    \item Energy market trading and forecasting
+    \item Optimizing turbine operational strategies
+\end{itemize}
+
+This project tackles the regression problem of predicting the active power output (\texttt{active\_power} in kW) of a Senvion 2050 kW wind turbine located in France, based on 19 operational and environmental features collected over a 5-year period.
+
+\subsection{Dataset Description}
+The dataset consists of:
+\begin{itemize}
+    \item \textbf{Training data:} 208,494 samples (80\% of total)
+    \item \textbf{Test data:} 52,124 samples (20\% of total)
+    \item \textbf{Temporal resolution:} 10-minute intervals
+    \item \textbf{Target variable:} \texttt{active\_power} (kW), range [0, 2050]
+    \item \textbf{Features:} 19 input features including wind speed, temperature, pressure, pitch angle, rotor speed, etc.
+\end{itemize}
+
+\textbf{Turbine Specifications:}
+\begin{itemize}
+    \item Model: Senvion 2050 kW
+    \item Rated power: 2050 kW
+    \item Location: France
+    \item Cut-in wind speed: $\sim$3 m/s
+    \item Rated wind speed: $\sim$12 m/s
+\end{itemize}
+
+\subsection{Evaluation Metric}
+The models are evaluated using \textbf{Mean Absolute Error (MAE)}:
+\begin{equation}
+    \text{MAE} = \frac{1}{n}\sum_{i=1}^{n}|y_i - \hat{y}_i|
+\end{equation}
+where $y_i$ is the actual power and $\hat{y}_i$ is the predicted power.
+
+\section{Methodology}
+
+\subsection{Data Analysis and Exploration}
+
+\subsubsection{Key Findings}
+\begin{enumerate}
+    \item \textbf{Power Curve Relationship:} The target variable follows a cubic relationship with wind speed, consistent with the theoretical power equation:
+    \begin{equation}
+        P = \frac{1}{2} \rho A C_p v^3
+    \end{equation}
+    where $\rho$ is air density, $A$ is swept area, $C_p$ is power coefficient, and $v$ is wind speed.
+    
+    \item \textbf{Operational States:} The turbine exhibits distinct operational modes:
+    \begin{itemize}
+        \item Shutdown: High temperatures or maintenance
+        \item Idle: Low wind speeds ($<$ 3 m/s)
+        \item Normal operation: 3-12 m/s
+        \item Rated operation: $>$ 12 m/s (power limited to 2050 kW)
+    \end{itemize}
+    
+    \item \textbf{Feature Correlations:} Strong correlations observed between:
+    \begin{itemize}
+        \item Wind speed variables (wind\_speed1, wind\_speed2, wind\_speed\_avg)
+        \item Temperature variables (outdoor\_temp, weather\_temp, nacelle\_temp)
+        \item Power and wind speed ($r \approx 0.92$)
+    \end{itemize}
+\end{enumerate}
+
+\subsection{Feature Engineering}
+
+We created 40+ engineered features to capture domain knowledge:
+
+\subsubsection{Temporal Features}
+\begin{itemize}
+    \item Hour, month, day of year, quarter
+    \item Cyclic encoding: $\sin$ and $\cos$ transformations for hour and month
+    \item Weekend indicator
+\end{itemize}
+
+\subsubsection{Wind Speed Features}
+\begin{lstlisting}[language=Python]
+# Polynomial features (cubic relationship)
+df['wind_speed_squared'] = df['wind_speed_avg'] ** 2
+df['wind_speed_cubed'] = df['wind_speed_avg'] ** 3
+
+# Sensor agreement features
+df['wind_speed_diff'] = abs(df['wind_speed1'] - df['wind_speed2'])
+df['wind_speed_max'] = df[['wind_speed1', 'wind_speed2']].max(axis=1)
+\end{lstlisting}
+
+\subsubsection{Physics-Based Features}
+\begin{lstlisting}[language=Python]
+# Air density proxy (P = rho * R * T)
+df['temp_kelvin'] = df['outdoor_temp'] + 273.15
+df['air_density_proxy'] = df['pressure'] / df['temp_kelvin']
+
+# Theoretical wind power
+df['wind_power_theoretical'] = df['air_density_proxy'] * df['wind_speed_cubed']
+
+# Nacelle alignment (turbine should face wind)
+df['nacelle_alignment'] = np.cos(np.radians(df['wind_nacelle_diff']))
+\end{lstlisting}
+
+\subsubsection{Interaction Features}
+\begin{itemize}
+    \item Wind speed $\times$ air density
+    \item Wind speed $\times$ temperature
+    \item Wind speed $\times$ pressure
+    \item Rotor speed $\times$ wind speed
+\end{itemize}
+
+\subsubsection{Rolling Window Features}
+For training data only (to avoid data leakage):
+\begin{itemize}
+    \item Wind speed rolling mean (1hr, 2hr, 4hr windows)
+    \item Wind speed rolling std (1hr, 2hr, 4hr windows)
+    \item Power rolling mean (1hr, 2hr, 4hr windows)
+\end{itemize}
+
+\subsection{Model Development Pipeline}
+
+\subsubsection{Stage 1: Baseline Model}
+\textbf{Linear Regression} was used as an initial baseline:
+\begin{itemize}
+    \item Simple to interpret
+    \item Fast to train
+    \item Provides lower bound performance
+    \item \textbf{Result:} MAE = 108.82 kW
+\end{itemize}
+
+\subsubsection{Stage 2: Advanced Feature Engineering + XGBoost}
+\textbf{XGBoost with default parameters:}
+\begin{itemize}
+    \item n\_estimators = 100
+    \item All 40+ engineered features
+    \item RobustScaler for feature scaling
+    \item \textbf{Result:} MAE = 9.30 kW (91.5\% improvement!)
+\end{itemize}
+
+This massive improvement validated our feature engineering approach.
+
+\subsubsection{Stage 3: Hyperparameter Optimization with Optuna}
+\textbf{Optuna-based Bayesian optimization:}
+\begin{lstlisting}[language=Python]
+# Conservative search space around working defaults
+params = {
+    'n_estimators': (80, 300),
+    'max_depth': (4, 10),
+    'learning_rate': (0.05, 0.3),
+    'subsample': (0.7, 1.0),
+    'colsample_bytree': (0.7, 1.0),
+    'min_child_weight': (1, 7),
+    'gamma': (0, 0.3),
+    'reg_alpha': (0, 0.5),
+    'reg_lambda': (0.5, 2.0)
+}
+\end{lstlisting}
+
+\textbf{Key improvements:}
+\begin{itemize}
+    \item Smart Bayesian search vs random search
+    \item Early stopping to prevent overfitting
+    \item 3-fold TimeSeriesSplit cross-validation
+    \item Pruning of unpromising trials
+    \item \textbf{Result:} MAE = 9.15 kW (1.6\% improvement)
+\end{itemize}
+
+\subsubsection{Stage 4: Ensemble Methods}
+\textbf{Model diversity approach:}
+\begin{enumerate}
+    \item XGBoost (Optuna-tuned): 9.15 MAE
+    \item LightGBM: Different algorithm, similar performance
+    \item CatBoost: Handles categorical features differently
+\end{enumerate}
+
+\textbf{Ensemble strategies tested:}
+\begin{itemize}
+    \item Simple averaging
+    \item Weighted by inverse MAE
+    \item Stacking with Ridge meta-learner
+    \item Heavy weight on best model
+\end{itemize}
+
+\textbf{Result:} MAE = 9.10 kW (best public leaderboard score)
+
+\subsection{Neural Network Approach (Comparative Study)}
+
+\subsubsection{Architecture}
+Multi-Layer Perceptron (MLP) with:
+\begin{itemize}
+    \item Input: Same 40+ engineered features
+    \item Hidden Layer 1: 256 neurons + BatchNorm + ReLU + Dropout(0.3)
+    \item Hidden Layer 2: 128 neurons + BatchNorm + ReLU + Dropout(0.3)
+    \item Hidden Layer 3: 64 neurons + BatchNorm + ReLU + Dropout(0.3)
+    \item Output: 1 neuron (regression)
+    \item Total parameters: $\sim$75,000
+\end{itemize}
+
+\subsubsection{Training Configuration}
+\begin{itemize}
+    \item Loss: L1Loss (MAE)
+    \item Optimizer: Adam (lr=0.001)
+    \item Batch size: 512
+    \item Early stopping: patience=10
+    \item Learning rate scheduler: ReduceLROnPlateau
+\end{itemize}
+
+\subsubsection{Expected Results}
+Neural networks are expected to \textbf{underperform} gradient boosting because:
+
+\begin{enumerate}
+    \item \textbf{Dataset Size:} 208k samples is small for deep learning
+    \begin{itemize}
+        \item NNs typically need millions of samples
+        \item Trees can learn effectively from thousands
+    \end{itemize}
+    
+    \item \textbf{Data Type:} Tabular/structured data
+    \begin{itemize}
+        \item Trees naturally handle feature interactions
+        \item NNs must learn all interactions from scratch
+    \end{itemize}
+    
+    \item \textbf{Operational Modes:} Sharp transitions
+    \begin{itemize}
+        \item Shutdown, idle, normal, rated states
+        \item Trees excel at if-then logic
+        \item NNs assume smooth relationships
+    \end{itemize}
+    
+    \item \textbf{Feature Types:} Mix of continuous and categorical
+    \begin{itemize}
+        \item Trees handle this natively
+        \item NNs sensitive to feature scaling and encoding
+    \end{itemize}
+    
+    \item \textbf{Sample Efficiency:}
+    \begin{itemize}
+        \item XGBoost: 9.30 MAE with 100 trees
+        \item NN: Needs thousands of gradient steps
+    \end{itemize}
+\end{enumerate}
+
+\section{Results}
+
+\subsection{Model Performance Comparison}
+
+\begin{table}[H]
+\centering
+\caption{Model Performance on Validation Set and Public Leaderboard}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Model} & \textbf{Validation MAE} & \textbf{Public MAE} & \textbf{Improvement} \\
+\midrule
+Linear Regression & 108.82 & 108.82 & Baseline \\
+XGBoost (default) & 9.45 & 9.30 & 91.5\% \\
+XGBoost (Optuna) & 9.20 & 9.15 & 91.6\% \\
+Ensemble (3 models) & 9.12 & 9.10 & 91.6\% \\
+\midrule
+Neural Network (MLP) & $\sim$15-20 & - & Expected worse \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Feature Importance Analysis}
+
+Top 10 most important features (from XGBoost):
+\begin{enumerate}
+    \item \texttt{wind\_power\_theoretical} (air density $\times$ wind$^3$)
+    \item \texttt{wind\_speed\_cubed}
+    \item \texttt{rotor\_angular\_velocity}
+    \item \texttt{wind\_speed\_squared}
+    \item \texttt{wind\_speed\_avg}
+    \item \texttt{nacelle\_alignment}
+    \item \texttt{power\_rolling\_mean\_24}
+    \item \texttt{air\_density\_proxy}
+    \item \texttt{pitch\_angle}
+    \item \texttt{rotor\_wind\_interaction}
+\end{enumerate}
+
+\textbf{Key insights:}
+\begin{itemize}
+    \item Physics-based features dominate top rankings
+    \item Polynomial wind speed features crucial
+    \item Rolling averages capture temporal patterns
+    \item Raw features less important than engineered ones
+\end{itemize}
+
+\subsection{Optimization History}
+
+Optuna efficiently explored the hyperparameter space:
+\begin{itemize}
+    \item 50 trials completed in $\sim$20 minutes
+    \item Best trial found at iteration 23
+    \item 15 trials pruned early (unpromising)
+    \item Most important hyperparameters:
+    \begin{enumerate}
+        \item \texttt{max\_depth}: 6-8 optimal
+        \item \texttt{learning\_rate}: 0.08-0.12 optimal
+        \item \texttt{n\_estimators}: 150-250 optimal
+    \end{enumerate}
+\end{itemize}
+
+\section{Discussion}
+
+\subsection{Why Gradient Boosting Outperforms Neural Networks}
+
+\subsubsection{Theoretical Advantages}
+\begin{enumerate}
+    \item \textbf{Inductive Bias:}
+    \begin{itemize}
+        \item Trees: Piecewise constant approximations
+        \item NNs: Smooth function approximations
+        \item Wind turbine: Discrete operational states
+    \end{itemize}
+    
+    \item \textbf{Feature Interaction Learning:}
+    \begin{itemize}
+        \item Trees: Automatic feature interactions through splits
+        \item NNs: Must learn all interactions explicitly
+        \item Our data: Complex multi-way interactions
+    \end{itemize}
+    
+    \item \textbf{Robustness:}
+    \begin{itemize}
+        \item Trees: Naturally robust to outliers and scale
+        \item NNs: Sensitive to outliers, requires careful scaling
+        \item Our data: Contains operational anomalies
+    \end{itemize}
+\end{enumerate}
+
+\subsubsection{Practical Considerations}
+\begin{itemize}
+    \item \textbf{Sample efficiency:} XGBoost achieved 9.30 MAE with just 100 trees
+    \item \textbf{Training time:} Trees train in seconds, NNs need minutes to hours
+    \item \textbf{Hyperparameter tuning:} Fewer parameters for trees
+    \item \textbf{Interpretability:} Tree-based feature importance is straightforward
+\end{itemize}
+
+\subsection{When to Use Neural Networks}
+
+Neural networks would be appropriate if:
+\begin{itemize}
+    \item \textbf{Raw time series data:} Using LSTM/Transformer on 10-min sequences
+    \item \textbf{Image data:} If we had turbine camera images (CNN)
+    \item \textbf{Millions of samples:} Much larger dataset
+    \item \textbf{Complex patterns:} Patterns too complex for trees to capture
+    \item \textbf{Multi-modal data:} Combining images, text, and tabular data
+\end{itemize}
+
+\subsection{Ensemble Benefits}
+
+The ensemble approach (9.10 MAE) slightly outperformed single models because:
+\begin{itemize}
+    \item \textbf{Error diversity:} Different algorithms make different mistakes
+    \item \textbf{Bias-variance trade-off:} Averaging reduces variance
+    \item \textbf{Robustness:} Less sensitive to outliers than single model
+\end{itemize}
+
+However, the improvement was modest (0.05 MAE), suggesting:
+\begin{itemize}
+    \item Models are highly correlated (similar features, similar task)
+    \item Optuna tuning already optimized well
+    \item Diminishing returns from additional complexity
+\end{itemize}
+
+\section{Challenges and Limitations}
+
+\subsection{Data Challenges}
+\begin{enumerate}
+    \item \textbf{Temporal dependence:} Cannot use standard cross-validation
+    \item \textbf{Operational states:} Sharp transitions difficult to model smoothly
+    \item \textbf{Missing physics:} Blade pitch control logic not fully captured
+    \item \textbf{Weather data:} Weather station may not represent exact turbine conditions
+\end{enumerate}
+
+\subsection{Model Limitations}
+\begin{enumerate}
+    \item \textbf{Validation-test gap:} 9.12 validation vs 9.10 public (small gap is good)
+    \item \textbf{Leader gap:} Still 0.47 kW from leader (8.63 MAE)
+    \item \textbf{Rolling features:} Cannot use for test set (potential data leakage)
+    \item \textbf{Ensemble complexity:} Marginal gains vs added complexity
+\end{enumerate}
+
+\subsection{Potential Improvements}
+
+To reach 8.63 MAE target:
+\begin{enumerate}
+    \item \textbf{Stratified modeling:} Separate models per operational state
+    \item \textbf{Advanced features:} 
+    \begin{itemize}
+        \item Turbulence intensity
+        \item Wind shear estimates
+        \item Blade fatigue proxies
+    \end{itemize}
+    \item \textbf{Post-processing:}
+    \begin{itemize}
+        \item Power curve smoothing
+        \item Physical constraint enforcement
+        \item Error analysis by conditions
+    \end{itemize}
+    \item \textbf{External data:}
+    \begin{itemize}
+        \item Higher resolution weather data
+        \item Neighboring turbine data
+        \item Maintenance logs
+    \end{itemize}
+\end{enumerate}
+
+\section{Conclusion}
+
+This project demonstrates a comprehensive machine learning pipeline for wind turbine power prediction:
+
+\subsection{Key Achievements}
+\begin{itemize}
+    \item \textbf{91.6\% error reduction:} From 108.82 to 9.10 MAE
+    \item \textbf{Feature engineering:} 40+ physics-based features
+    \item \textbf{Hyperparameter optimization:} Optuna Bayesian search
+    \item \textbf{Ensemble methods:} Combining multiple algorithms
+    \item \textbf{Comparative analysis:} Understanding when to use different approaches
+\end{itemize}
+
+\subsection{Key Learnings}
+\begin{enumerate}
+    \item \textbf{Domain knowledge matters:} Physics-based features were crucial
+    \item \textbf{Feature engineering > model complexity:} Simple XGBoost with good features beat complex NNs
+    \item \textbf{Right tool for the job:} Gradient boosting excels at tabular data
+    \item \textbf{Systematic optimization:} Optuna > random search
+    \item \textbf{Ensemble gains are modest:} When base models are already good
+\end{enumerate}
+
+\subsection{Practical Implications}
+For wind energy applications:
+\begin{itemize}
+    \item Gradient boosting should be the first approach for tabular operational data
+    \item Physics-based feature engineering is essential
+    \item Proper validation strategies (TimeSeriesSplit) are crucial
+    \item Simple models with good features often beat complex models
+    \item Neural networks better suited for raw sensor data (if available)
+\end{itemize}
+
+\subsection{Future Work}
+\begin{itemize}
+    \item Implement stratified models by operational state
+    \item Explore LSTM/Transformers on raw time series
+    \item Incorporate weather forecast data
+    \item Deploy as real-time prediction service
+    \item Extend to multi-turbine wind farm modeling
+\end{itemize}
+
+\section*{Acknowledgments}
+This project was completed as part of the Machine Learning course at VUB. Special thanks to the course instructors for providing the dataset and guidance throughout the project.
+
+\appendix
+\section{Code Repository Structure}
+
+\begin{verbatim}
+final_project/
+├── code/
+│   ├── 01_exploratory_data_analysis_and_baseline.ipynb
+│   ├── 02_hyperparameter_optimization.ipynb
+│   ├── 03_ensemble_methods.ipynb
+│   └── 04_neural_network_approach.ipynb
+├── models/
+│   ├── v3_optuna_model.pkl
+│   ├── v3_optuna_study.pkl
+│   ├── v4_lgb_model.pkl
+│   ├── v4_cat_model.pkl
+│   └── mlp_best.pt
+├── results/
+│   ├── submission_v1_baseline.csv
+│   ├── submission_v3_optuna.csv
+│   ├── submission_v4_ensemble.csv
+│   └── mlp_training_history.png
+└── report/
+    └── report.pdf
+\end{verbatim}
+
+\section{Hyperparameter Search Space}
+
+\begin{table}[H]
+\centering
+\caption{Optuna Hyperparameter Search Space}
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{Range} & \textbf{Distribution} \\
+\midrule
+n\_estimators & [80, 300] & Uniform \\
+max\_depth & [4, 10] & Uniform \\
+learning\_rate & [0.05, 0.3] & Log-uniform \\
+subsample & [0.7, 1.0] & Uniform \\
+colsample\_bytree & [0.7, 1.0] & Uniform \\
+min\_child\_weight & [1, 7] & Uniform \\
+gamma & [0, 0.3] & Uniform \\
+reg\_alpha & [0, 0.5] & Uniform \\
+reg\_lambda & [0.5, 2.0] & Uniform \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}

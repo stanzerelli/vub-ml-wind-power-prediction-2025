@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.class
+.ipynb_checkpoints/
+.venv/
+env/
+venv/
+*.so
+.DS_Store
+results/*.png
+results/*.csv
+models/*.pkl
+models/*.pt
+models/*.cbm
+!results/.gitkeep
+!models/.gitkeep
